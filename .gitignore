@@ -1,0 +1,29 @@
+# Конфиденциальные данные (реальная отчетность) — не публиковать
+input/
+output/
+test_data/
+reference/
+information services/
+Шаблоны/
+Команда запуска FSA.txt
+
+# Служебные и отладочные скрипты (только в корне проекта)
+/check_all.py
+/debug_text.py
+/extract_amortization.py
+/find_amort.py
+/page_scan.py
+/claude.local.json
+/CLAUDE.md
+
+# Служебные папки Claude Code
+.claude/
+.playwright-mcp/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
