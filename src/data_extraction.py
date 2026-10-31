@@ -446,6 +446,7 @@ class DataExtractor:
         """Путь к tesseract.exe: TESSERACT_CMD, PATH, стандартные пути Windows."""
         import shutil
         candidates = [os.environ.get("TESSERACT_CMD"), "tesseract.exe",
+                      "tesseract",
                       r"C:\Program Files\Tesseract-OCR\tesseract.exe",
                       r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"]
         for cand in candidates:
