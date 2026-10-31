@@ -16,8 +16,11 @@ information services/
 /claude.local.json
 /CLAUDE.md
 
-# Служебные папки Claude Code
-.claude/
+# Служебные папки Claude Code (публикуем только скилл fsa-repo)
+.claude/*
+!/.claude/skills
+.claude/skills/*
+!/.claude/skills/fsa-repo
 .playwright-mcp/
 
 # Python
