@@ -7,6 +7,7 @@ import streamlit as st
 
 from data_extraction import DataExtractor
 from analytics import AnalyticsEngine
+from amortization import extract_from_pdf, pick_depreciation
 from charts import (BASE_STYLE, SMALL_LABEL, accent_colors, merge_style,
                     structure_chart, dynamics_bars, fin_results_bars,
                     grouped_histogram)
@@ -67,9 +68,16 @@ def user_manual():
           формы исключены).
 
         **Экран 3. Данные по амортизации**
-        - Введите амортизацию за отчетный и предыдущий период (для EBITDA)
-          или выберите «Нет данных» — тогда EBITDA/EBIT будет рассчитан
-          без амортизации, с пометкой в таблице расчетов.
+        - Загрузите PDF с пояснительной запиской прямо на этом экране
+          (в формах Баланс/ОФР амортизации с суммами нет) и нажмите
+          «🔍 Распознать». Отобразятся найденные строки (для сканов —
+          OCR, точность ограничена), а предложенные значения подставятся
+          в поля ввода.
+        - **Расчет начинается только после подтверждения**: проверьте
+          значение в полях и нажмите «📉 Ввести данные» (EBITDA будет
+          рассчитан с амортизацией), либо выберите «Нет данных» — тогда
+          EBITDA/EBIT будет рассчитан без амортизации, с пометкой в
+          таблице расчетов.
         - Здесь же можно загрузить корпоративный стиль (JSON) для
           диаграмм.
 
@@ -249,6 +257,18 @@ if "analytics_results" not in st.session_state:
 if "generated" not in st.session_state:
     # dict: файл -> {"path": путь, "violations": [нарушения анонимизации]}
     st.session_state.generated = {}
+if "amort_candidates" not in st.session_state:
+    # строки со словом «амортизация», найденные в PDF (None — не искали)
+    st.session_state.amort_candidates = None
+if "amort_suggested" not in st.session_state:
+    # предложенные значения {год: сумма} — подставляются в поля экрана 3
+    st.session_state.amort_suggested = None
+if "amort_info" not in st.session_state:
+    # диагностика последнего распознавания: {pages, ocr_pages, ocr_available}
+    st.session_state.amort_info = None
+if "amort_error" not in st.session_state:
+    # текст ошибки распознавания (показывается после перезагрузки страницы)
+    st.session_state.amort_error = None
 
 # Инициализация экстрактора
 extractor = DataExtractor()
@@ -312,6 +332,17 @@ def run_calc(depreciation):
     st.session_state.analytics_results = engine.compute_all(depreciation)
     st.session_state.current_step = "analytics"
     st.rerun()
+
+
+def _dep_input(year):
+    """Поле ввода амортизации на экране 3. Распознанные из PDF значения
+    (amort_suggested) подставляются в поле; ключ хранит правки пользователя
+    между перезагрузками страницы."""
+    key = f"dep_input_{year}"
+    kwargs = {"min_value": 0.0, "format": "%.0f", "key": key}
+    if key not in st.session_state:
+        kwargs["value"] = 0.0
+    return st.number_input(f"Амортизация за {year} г., тыс. руб.", **kwargs)
 
 
 def _df_xlsx_bytes(df: pd.DataFrame) -> bytes:
@@ -690,6 +721,9 @@ if st.session_state.current_step == "upload":
             finally:
                 shutil.rmtree(tmpdir, ignore_errors=True)
 
+            st.session_state.amort_candidates = None
+            st.session_state.amort_suggested = None
+            st.session_state.amort_info = None
             st.session_state.extract_report = report
             st.session_state.verify_errors = None
             st.session_state.form_verify_errors = None
@@ -915,6 +949,97 @@ elif st.session_state.current_step == "calc_input":
 
     years = AnalyticsEngine(st.session_state.extracted_data).years
 
+    # --- Распознавание амортизации из PDF (текстовый слой / OCR) --- #
+    recognized = (st.session_state.get("amort_candidates") is not None
+                  or st.session_state.get("amort_suggested") is not None)
+    with st.expander("🔍 Загрузить пояснительную записку и распознать амортизацию",
+                     expanded=recognized):
+        st.caption("Загрузите PDF (обычно пояснительная записка — в формах "
+                   "Баланс/ОФР амортизации с суммами нет) и нажмите "
+                   "«Распознать». Для сканов выполняется OCR (точность "
+                   "ограничена — проверьте значения). Расчет начнется "
+                   "только после подтверждения кнопкой «📉 Ввести данные».")
+        amort_file = st.file_uploader("PDF с амортизацией", type=["pdf"],
+                                      key="amort_pdf")
+        if amort_file is not None and st.button("🔍 Распознать"):
+            bar = st.progress(0.05, "Читаю страницы…")
+            cands = []
+            ainfo = {"pages": 0, "ocr_pages": 0, "ocr_available": True}
+            aerror = None
+            tmpdir = tempfile.mkdtemp(prefix="fsa_amort_")
+            try:
+                path = os.path.join(tmpdir, amort_file.name)
+                with open(path, "wb") as f:
+                    f.write(amort_file.getbuffer())
+                cands, ainfo = extract_from_pdf(
+                    path,
+                    progress_cb=lambda d, t: bar.progress(
+                        min(0.99, d / t),
+                        f"«{amort_file.name}»: страница {d} из {t}…"))
+            except Exception as e:
+                aerror = str(e)
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+            st.session_state.amort_error = aerror
+            st.session_state.amort_info = ainfo
+            dep = None
+            if not aerror:
+                st.session_state.amort_candidates = cands
+                dep = pick_depreciation(cands, years)
+            else:
+                st.session_state.amort_candidates = None
+            st.session_state.amort_suggested = dep
+            if dep:
+                for y, val in dep.items():
+                    st.session_state[f"dep_input_{y}"] = float(val)
+            bar.progress(1.0, "Готово")
+            st.rerun()
+
+        if st.session_state.get("amort_error"):
+            st.error("Распознавание не удалось: {}. Значения можно "
+                     "ввести вручную или выбрать «Нет данных».".format(
+                         st.session_state.amort_error))
+        if st.session_state.get("amort_candidates") is not None:
+            cands = st.session_state.amort_candidates
+            ainfo = st.session_state.get("amort_info") or {}
+            if ainfo.get("ocr_available") is False:
+                st.error("Tesseract OCR недоступен — страницы-сканы не "
+                         "распознаны. Установите Tesseract OCR (или "
+                         "задайте путь в переменной TESSERACT_CMD); "
+                         "значения можно ввести вручную.")
+            if cands:
+                st.caption(f"Найдено строк со словом «амортизация»: "
+                           f"{len(cands)}. Значения из итоговой строки "
+                           "предложены ниже.")
+                st.dataframe(
+                    pd.DataFrame([{"Стр.": c["page"], "Строка из PDF": c["text"],
+                                   "Числа в строке": ", ".join(
+                                       f"{s:,.0f}".replace(",", " ")
+                                       for s in c["sums"])}
+                                  for c in cands]),
+                    use_container_width=True, hide_index=True)
+            elif ainfo.get("pages"):
+                st.warning(
+                    "Строк со словом «амортизация» не найдено. "
+                    "Проверено страниц: {} ({}). Проверьте, что это "
+                    "пояснительная записка, либо введите значения "
+                    "вручную / выберите «Нет данных».".format(
+                        ainfo["pages"],
+                        "сканы распознаны OCR" if ainfo.get("ocr_pages")
+                        else "только текстовый слой"))
+            else:
+                st.warning("Файл пуст или не читается — введите значения "
+                           "вручную или выберите «Нет данных».")
+            sug = st.session_state.get("amort_suggested")
+            if sug:
+                sug_txt = "; ".join(
+                    f"{y} г. — {v:,.0f}".replace(",", " ")
+                    for y, v in sorted(sug.items(), reverse=True))
+                st.success("Отчетный и предыдущий период распознаны. "
+                           "Подставлено в поля: {s} тыс. руб. "
+                           "Подтвердите их кнопкой «📉 Ввести данные».".format(s=sug_txt))
+
     # --- FR-11: выбор корпоративного стиля ---
     with st.expander("🎨 Стиль оформления (по умолчанию — базовый стиль приложения)"):
         st.caption("Можно загрузить JSON-файл с корпоративными цветами. Ключи: "
@@ -947,13 +1072,15 @@ elif st.session_state.current_step == "calc_input":
 
     with col1:
         st.markdown("**Вариант 1: ввести данные**")
+        if st.session_state.get("amort_suggested"):
+            st.caption("В поля подставлены значения, распознанные из PDF. "
+                       "Проверьте, при необходимости исправьте и нажмите "
+                       "«Ввести данные» — EBITDA будет рассчитан с ними.")
         a = b = 0.0
         if len(years) >= 1:
-            a = st.number_input(f"Амортизация за {years[0]} г., тыс. руб.",
-                                min_value=0.0, value=0.0, format="%.0f")
+            a = _dep_input(years[0])
         if len(years) >= 2:
-            b = st.number_input(f"Амортизация за {years[1]} г., тыс. руб.",
-                                min_value=0.0, value=0.0, format="%.0f")
+            b = _dep_input(years[1])
         if st.button("📉 Ввести данные"):
             dep = {}
             if len(years) >= 1:
