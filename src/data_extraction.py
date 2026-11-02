@@ -166,22 +166,30 @@ class DataExtractor:
     # ---------------------------- XLSX ------------------------------- #
 
     def extract_from_xlsx(self, file_path: str) -> Dict[str, List[Dict[str, Any]]]:
+        """Все листы книги по отдельности: сервис ФНС и БФО кладут
+        в один XLSX несколько форм (лист-«Сведения об организации»
+        без числовых таблиц пропускается). Форма каждого листа
+        определяется по его тексту; лист формы уже извлечен — данные
+        этой формы перезаписываются."""
         try:
-            df = pd.read_excel(file_path, header=None)
+            sheets = pd.read_excel(file_path, header=None, sheet_name=None)
         except Exception as e:
             print(f"Error reading XLSX {file_path}: {e}")
             return {}
 
-        full_text = " ".join(str(v) for v in df.values.flatten())
-        form = detect_form(full_text)
-        if form is None:
-            return {}
-
-        if form == "ОИК":
-            rows = self._oik_from_xlsx(df)
-        else:
-            rows = self._standard_from_xlsx(df)
-        return {form: rows} if rows else {}
+        results: Dict[str, List[Dict[str, Any]]] = {}
+        for sheet_name, df in sheets.items():
+            full_text = " ".join(str(v) for v in df.values.flatten())
+            form = detect_form(full_text)
+            if form is None:
+                continue
+            if form == "ОИК":
+                rows = self._oik_from_xlsx(df)
+            else:
+                rows = self._standard_from_xlsx(df)
+            if rows:
+                results[form] = rows
+        return results
 
     @staticmethod
     def _find_code_column(df: pd.DataFrame) -> Optional[Tuple[int, int]]:
@@ -192,6 +200,19 @@ class DataExtractor:
             if code_col is not None:
                 return i, code_col
         return None
+
+    @staticmethod
+    def _find_name_column(df: pd.DataFrame, header_i: int,
+                          code_col: int) -> int:
+        """Колонка с наименованиями строк: по заголовку «Наименование…» в
+        строке шапки (в файлах сервиса ФНС она далеко от колонки кода),
+        иначе — колонка слева от кода."""
+        cells = [str(c).lower() if pd.notna(c) else "" for c in df.iloc[header_i]]
+        name_col = next((j for j, c in enumerate(cells)
+                         if "наименование" in c), None)
+        if name_col is not None:
+            return name_col
+        return code_col - 1 if code_col > 0 else 0
 
     @staticmethod
     def _extract_year_cols(header_row: List[Any], code_col: int) -> Dict[int, str]:
@@ -215,7 +236,7 @@ class DataExtractor:
         if head is None:
             return []
         header_i, code_col = head
-        name_col = code_col - 1 if code_col > 0 else 0
+        name_col = self._find_name_column(df, header_i, code_col)
 
         value_cols = self._extract_year_cols(
             [df.iat[header_i, j] for j in range(df.shape[1])], code_col
@@ -230,7 +251,11 @@ class DataExtractor:
             code = norm_code(r[code_col])
             vals = {key: clean_value(r[j]) if j < df.shape[1] else 0.0
                     for j, key in value_cols.items()}
-            # Строки без кода и без значений — служебные, пропускаем.
+            # Строки без кода и без значений — служебные, пропускаем;
+            # у строк показателя код всегда 4–5 цифр, короткий
+            # числовой код — нумерация граф шапки («1 | 2 | 3 4 5»), пропуск.
+            if code and not re.fullmatch(r"\d{4,5}", code):
+                continue
             if not code and not any(vals.values()):
                 continue
             rows.append({"indicator": name, "code": code, **vals})
@@ -263,6 +288,10 @@ class DataExtractor:
             code = norm_code(r[code_col])
             vals = {canon: clean_value(r[j]) if j < df.shape[1] else 0.0
                     for j, canon in col_map.items()}
+            # у строк показателя код 4–5 цифр, короткий числовой код —
+            # нумерация граф шапки
+            if code and not re.fullmatch(r"\d{4,5}", code):
+                continue
             if not code and not any(vals.values()):
                 continue  # служебная строка/подзаголовок
             rows.append({"section": section, "indicator": name, "code": code, **vals})
@@ -812,6 +841,12 @@ class DataExtractor:
             # Официальные коды PDF (ОКУД 0710004)
             {"closing": "3300", "opening": "3201",
              "moves": ("3311", "3312", "3327", "3330", "3316", "3340")},
+            # Файлы сервиса ФНС: строки только 3100/3200/3300,
+            # 3200 — капитал на конец прошлого года (начало отчетного);
+            # движения годовыми итогами 3310/3320 (строки «в том
+            # числе» идут по кодам 3311+/3321+ и не содержат всей суммы)
+            {"closing": "3300", "opening": "3200",
+             "moves": ("3310", "3320")},
         ]
         by_code = {}
         for r in rows:
@@ -826,8 +861,8 @@ class DataExtractor:
                 break
         if variant is None:
             errors.append("ОИК: не найдены итоговые строки капитала "
-                          "(коды 83300/63201 или 3300/3201) — проверка невозможна, "
-                          "требует уточнения")
+                          "(коды 83300/63201, 3300/3201 или 3300/3200) — "
+                          "проверка невозможна, требует уточнения")
             return errors
 
         move_codes = [c for c in variant["moves"] if c in by_code]
