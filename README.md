@@ -30,7 +30,7 @@
 
 | Проверка контрольных сумм | Экран 3. Данные по амортизации (EBITDA) |
 | :---: | :---: |
-| ![Проверка](docs/screenshots/04_check_ok.png) | ![Амортизация](docs/screenshots/05_amortization.png) |
+| ![Проверка](docs/screenshots/04_check_ok.png) | ![docs/screenshots/05.1_amortization.jpg) |
 
 | Экран 4. Основные показатели | Горизонтальный анализ |
 | :---: | :---: |
